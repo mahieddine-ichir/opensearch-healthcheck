@@ -1,0 +1,6 @@
+# IDE
+.idea/
+*.iml
+
+# Report output files
+opensearch-report-*.txt

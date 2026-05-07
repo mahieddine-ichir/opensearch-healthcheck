@@ -184,7 +184,7 @@ check_nodes() {
     [[ "${heap_i:-0}" -gt 85 ]] && warn "Node $name : heap élevé (${heap}%)"
     [[ "${cpu_i:-0}"  -gt 80 ]] && warn "Node $name : CPU élevé (${cpu}%)"
     [[ "${disk_i:-0}" -gt 85 ]] && warn "Node $name : disque élevé (${disk}%)"
-  done
+  done || true
 
   subsection "Thread pools (rejections)"
   local tp
@@ -238,7 +238,7 @@ check_nodes() {
     printf "  %-40s %10s %10s %10s %7s%%\n" "$node_name" "$shard_count" "$max_shards_conf" "$libre" "$pct"
     [[ "${pct_i:-0}" -ge 90 ]] && err  "Node $node_name : shards à ${pct}% de la limite !"
     [[ "${pct_i:-0}" -ge 75 && "${pct_i:-0}" -lt 90 ]] && warn "Node $node_name : shards à ${pct}% de la limite"
-  done
+  done || true
 
   # ── Espace disque par node ──────────────────────────────────────────────────
   subsection "Espace disque par node"
@@ -270,7 +270,7 @@ check_nodes() {
     [[ "${pct_i:-0}" -ge 85 ]] && warn "Node $name : proche du watermark LOW (85%) → allocation shards bloquée"
     [[ "${pct_i:-0}" -ge 90 ]] && err  "Node $name : watermark HIGH (90%) dépassé → shards seront déplacés !"
     [[ "${pct_i:-0}" -ge 95 ]] && err  "Node $name : watermark FLOOD (95%) dépassé → index en READ-ONLY !"
-  done
+  done || true
 
   subsection "Watermarks disque configurés"
   local wm_low wm_high wm_flood
