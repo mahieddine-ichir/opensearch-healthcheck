@@ -69,7 +69,7 @@ PREFIX="${INDEX_TO_DELETE%-*}"
 # Date suffix
 DATE_SUFFIX=$(date +"%Y.%m.%d")
 
-BASE_URL="http://${HOST}:${PORT}"
+BASE_URL="https://${HOST}:${PORT}"
 
 # Auth header (only if credentials provided)
 AUTH_ARGS=()
