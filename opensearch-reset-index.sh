@@ -69,7 +69,7 @@ PREFIX="${INDEX_TO_DELETE%-*}"
 # Date suffix
 DATE_SUFFIX=$(date +"%Y.%m.%d")
 
-BASE_URL="https://${HOST}:${PORT}"
+BASE_URL="http://${HOST}:${PORT}"
 
 # Auth header (only if credentials provided)
 AUTH_ARGS=()
@@ -158,6 +158,7 @@ log "============================================================"
 # ── Step 1: Verify the target index exists ────────────────────────────────────
 # Note: HEAD + HTTP/2 causes curl to report "N bytes missing" because the server
 #       returns Content-Length but no body (correct per spec). We use GET instead.
+INDEX_EXISTS=false
 log "Step 1 — Checking index '${INDEX_TO_DELETE}' exists..."
 if ! $DRY_RUN; then
   http_code=$(curl -s -o /dev/null -w "%{http_code}" \
@@ -166,20 +167,26 @@ if ! $DRY_RUN; then
     "${BASE_URL}/${INDEX_TO_DELETE}?pretty=false")
   if [[ "$http_code" == "200" ]]; then
     log "→ Index exists (HTTP 200)"
+    INDEX_EXISTS=true
   elif [[ "$http_code" == "404" ]]; then
-    warn "→ Index '${INDEX_TO_DELETE}' not found (HTTP 404). It may already be deleted."
-    warn "   Skipping delete step and continuing..."
+    warn "→ Index '${INDEX_TO_DELETE}' not found (HTTP 404) — skipping delete."
   else
     err "Unexpected HTTP $http_code when checking index existence."
   fi
+else
+  INDEX_EXISTS=true  # assume exists in dry-run
 fi
 
-# ── Step 2: Delete the old index ──────────────────────────────────────────────
+# ── Step 2: Delete the old index (only if it exists) ─────────────────────────
 log ""
-log "Step 2 — Deleting index '${INDEX_TO_DELETE}'..."
-run_curl DELETE \
-  "${BASE_URL}/${INDEX_TO_DELETE}" \
-  "DELETE /${INDEX_TO_DELETE}"
+if $INDEX_EXISTS; then
+  log "Step 2 — Deleting index '${INDEX_TO_DELETE}'..."
+  run_curl DELETE \
+    "${BASE_URL}/${INDEX_TO_DELETE}" \
+    "DELETE /${INDEX_TO_DELETE}"
+else
+  log "Step 2 — Skipped (index '${INDEX_TO_DELETE}' does not exist)."
+fi
 
 # ── Step 3: Create the new dated index ───────────────────────────────────────
 log ""
