@@ -69,9 +69,6 @@ PREFIX="${INDEX_TO_DELETE%-*}"
 # Date suffix
 DATE_SUFFIX=$(date +"%Y.%m.%d")
 
-# New index name: <prefix>-<date>-00001
-NEW_INDEX="${PREFIX}-${DATE_SUFFIX}-00001"
-
 BASE_URL="http://${HOST}:${PORT}"
 
 # Auth header (only if credentials provided)
@@ -116,10 +113,42 @@ run_curl() {
   fi
 }
 
+# ── auto-increment: find next available sequence number ───────────────────────
+# Query OpenSearch for all indices matching <prefix>-<date>-* and pick max+1.
+# Falls back to 00001 if none exist or in dry-run mode.
+resolve_new_index() {
+  local base_pattern="${PREFIX}-${DATE_SUFFIX}-"
+  local next_seq=1
+
+  if ! $DRY_RUN; then
+    # _cat/indices returns one line per index; grep our pattern, extract seq number
+    local existing
+    existing=$(curl -s \
+      "${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"}" \
+      "${BASE_URL}/_cat/indices/${base_pattern}*?h=index" 2>/dev/null || true)
+
+    if [[ -n "$existing" ]]; then
+      # Extract the numeric suffix (last field after final '-'), find the max
+      local max_seq
+      max_seq=$(echo "$existing" \
+        | grep -oE '[0-9]{5}$' \
+        | sort -n \
+        | tail -1)
+      if [[ -n "$max_seq" ]]; then
+        next_seq=$(( 10#$max_seq + 1 ))
+      fi
+    fi
+  fi
+
+  printf "%s%05d" "${base_pattern}" "$next_seq"
+}
+
+NEW_INDEX=$(resolve_new_index)
+
 # ── main ──────────────────────────────────────────────────────────────────────
 log "============================================================"
 log "OpenSearch index reset script"
-log "  Host          : ${BASE_URL}"
+log "  Host            : ${BASE_URL}"
 log "  Index to delete : ${INDEX_TO_DELETE}"
 log "  New index       : ${NEW_INDEX}"
 log "  Alias           : ${ALIAS_NAME}"
@@ -127,12 +156,14 @@ $DRY_RUN && log "  Mode            : DRY-RUN"
 log "============================================================"
 
 # ── Step 1: Verify the target index exists ────────────────────────────────────
+# Note: HEAD + HTTP/2 causes curl to report "N bytes missing" because the server
+#       returns Content-Length but no body (correct per spec). We use GET instead.
 log "Step 1 — Checking index '${INDEX_TO_DELETE}' exists..."
 if ! $DRY_RUN; then
   http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-    -X HEAD \
+    -X GET \
     "${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"}" \
-    "${BASE_URL}/${INDEX_TO_DELETE}")
+    "${BASE_URL}/${INDEX_TO_DELETE}?pretty=false")
   if [[ "$http_code" == "200" ]]; then
     log "→ Index exists (HTTP 200)"
   elif [[ "$http_code" == "404" ]]; then
