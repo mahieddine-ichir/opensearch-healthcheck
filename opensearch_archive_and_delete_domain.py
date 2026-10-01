@@ -5,6 +5,7 @@ Archive, then delete, every audit document of one domain indexed before a cutoff
   1. Lists the domain's indices and counts matching documents per index.
   2. Exports them to a zip (one NDJSON file per index + mappings/settings + manifest), then
      checks the zip's CRCs and that the exported count equals the counted one.
+     Skipped with --no-archive (delete only, nothing recoverable).
   3. Asks for confirmation, then runs _delete_by_query per index with the SAME query.
 
 Documents are selected by `@timestamp < cutoff` AND `domain == <domain>`. @timestamp is the
@@ -18,6 +19,10 @@ Examples:
   ./opensearch_archive_and_delete_domain.py --host http://localhost:9200 --domain wcbno \\
       --before "2026-09-30 12:15" --dry-run
 
+  # AWS VPC domain through an SSM tunnel (see --insecure)
+  ./opensearch_archive_and_delete_domain.py --host https://localhost:9200 --insecure --domain wcbno \\
+      --before "2026-09-30 12:15" --dry-run
+
   # 2. Archive then delete (asks for confirmation before deleting)
   ./opensearch_archive_and_delete_domain.py --host http://localhost:9200 --domain wcbno \\
       --before "2026-09-30 12:15"
@@ -26,6 +31,7 @@ Restore (per index file):  each line is {"_index", "_id", "_source"}; replay it 
 """
 import argparse
 import json
+import ssl
 import sys
 import time
 import urllib.error
@@ -39,9 +45,12 @@ PARIS = ZoneInfo("Europe/Paris")
 
 
 class OpenSearch:
-    def __init__(self, host, timeout):
+    def __init__(self, host, timeout, insecure=False):
         self.host = host.rstrip("/")
         self.timeout = timeout
+        # For tunnels (SSM port forwarding to https://localhost:<port>), where the domain's
+        # certificate can't match the host we connect to.
+        self.ssl_context = ssl._create_unverified_context() if insecure else None
 
     def request(self, method, path, body=None, params=None):
         url = self.host + path
@@ -51,7 +60,7 @@ class OpenSearch:
         req = urllib.request.Request(url, data=data, method=method,
                                      headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout, context=self.ssl_context) as resp:
                 raw = resp.read()
                 return json.loads(raw) if raw else {}
         except urllib.error.HTTPError as e:
@@ -181,13 +190,19 @@ def main():
     p.add_argument("--output", help="Zip path. Default: <domain>-before-<cutoff>.zip")
     p.add_argument("--dry-run", action="store_true", help="Only list indices and counts")
     p.add_argument("--export-only", action="store_true", help="Archive, but do not delete")
+    p.add_argument("--no-archive", action="store_true",
+                   help="Delete WITHOUT archiving first - the documents are gone for good")
     p.add_argument("--yes", action="store_true", help="Do not ask for confirmation before deleting")
     p.add_argument("--batch-size", type=int, default=5000)
     p.add_argument("--scroll", default="10m")
     p.add_argument("--timeout", type=int, default=120, help="HTTP timeout in seconds")
+    p.add_argument("--insecure", action="store_true",
+                   help="Skip TLS certificate verification (e.g. https://localhost through an SSM tunnel)")
     args = p.parse_args()
+    if args.no_archive and (args.export_only or args.output):
+        p.error("--no-archive cannot be combined with --export-only or --output")
 
-    os_ = OpenSearch(args.host, args.timeout)
+    os_ = OpenSearch(args.host, args.timeout, args.insecure)
     cutoff = parse_cutoff(args.before)
     cutoff_ms = int(cutoff.timestamp() * 1000)
     pattern = args.index_pattern or f"{args.domain}-auditdata-*"
@@ -214,6 +229,40 @@ def main():
         print("Dry run - nothing exported or deleted." if args.dry_run else "Nothing to do.")
         return
 
+    if args.no_archive:
+        print("⚠️  --no-archive: skipping the export, these documents will NOT be recoverable.")
+    else:
+        archive(os_, args, indices, query, counts, total, cutoff, cutoff_ms, pattern)
+        if args.export_only:
+            print("Export only - nothing deleted.")
+            return
+
+    if not args.yes:
+        affected = sum(1 for c in counts.values() if c)
+        backup = "WITHOUT any backup" if args.no_archive else "(archived)"
+        try:
+            answer = input(f"\nDelete these {total} documents {backup} from {affected} index(es) on {args.host}? "
+                           f"Type the domain name ({args.domain}) to confirm: ")
+        except EOFError:
+            # No stdin (nohup, cron, piped): never delete without an explicit --yes.
+            print("\nNo terminal to confirm from - nothing deleted. Re-run with --yes to delete non-interactively.")
+            return
+        if answer.strip() != args.domain:
+            print("Aborted - nothing deleted.")
+            return
+
+    print("➡️  Deleting")
+    deleted = delete(os_, indices, query, counts, poll_seconds=2)
+    remaining = {i: os_.request("POST", f"/{i}/_count", body={"query": query})["count"]
+                 for i in indices if counts[i]}
+    print(f"\n✅ Deleted {sum(deleted.values())} of {total} documents.")
+    left = {i: n for i, n in remaining.items() if n}
+    if left:
+        print(f"⚠️  Still matching after delete: {left}")
+    print("Note: disk space is reclaimed progressively by segment merges, not immediately.")
+
+
+def archive(os_, args, indices, query, counts, total, cutoff, cutoff_ms, pattern):
     zip_path = args.output or f"{args.domain}-before-{cutoff.astimezone(PARIS):%Y%m%d-%H%M}.zip"
     manifest = {
         "host": args.host, "domain": args.domain, "index_pattern": pattern,
@@ -231,28 +280,6 @@ def main():
             print(f"❌ {i}: counted {c}, exported {e}")
         raise SystemExit("❌ Export incomplete - nothing deleted.")
     print(f"✅ Archive verified: {sum(exported.values())} documents in {zip_path}")
-
-    if args.export_only:
-        print("Export only - nothing deleted.")
-        return
-
-    if not args.yes:
-        affected = sum(1 for c in counts.values() if c)
-        answer = input(f"\nDelete these {total} documents from {affected} index(es) on {args.host}? "
-                       f"Type the domain name ({args.domain}) to confirm: ")
-        if answer.strip() != args.domain:
-            print("Aborted - nothing deleted.")
-            return
-
-    print("➡️  Deleting")
-    deleted = delete(os_, indices, query, counts, poll_seconds=2)
-    remaining = {i: os_.request("POST", f"/{i}/_count", body={"query": query})["count"]
-                 for i in indices if counts[i]}
-    print(f"\n✅ Deleted {sum(deleted.values())} of {total} documents.")
-    left = {i: n for i, n in remaining.items() if n}
-    if left:
-        print(f"⚠️  Still matching after delete: {left}")
-    print("Note: disk space is reclaimed progressively by segment merges, not immediately.")
 
 
 if __name__ == "__main__":
