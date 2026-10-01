@@ -19,6 +19,10 @@ Examples:
   ./opensearch_archive_and_delete_domain.py --host http://localhost:9200 --domain wcbno \\
       --before "2026-09-30 12:15" --dry-run
 
+  # One specific index only
+  ./opensearch_archive_and_delete_domain.py --host http://localhost:9200 --domain wcbno \\
+      --index wcbno-auditdata-pro-ttl30d-2026.09.29-00001 --before "2026-09-30 12:15" --dry-run
+
   # AWS VPC domain through an SSM tunnel (see --insecure)
   ./opensearch_archive_and_delete_domain.py --host https://localhost:9200 --insecure --domain wcbno \\
       --before "2026-09-30 12:15" --dry-run
@@ -184,7 +188,10 @@ def main():
     p.add_argument("--domain", required=True, help="Audit domain, e.g. wcbno")
     p.add_argument("--before", required=True,
                    help='Cutoff, exclusive. Paris time unless an offset is given, e.g. "2026-09-30 12:15"')
-    p.add_argument("--index-pattern", help="Default: <domain>-auditdata-*")
+    target = p.add_mutually_exclusive_group()
+    target.add_argument("--index-pattern", help="Default: <domain>-auditdata-*")
+    target.add_argument("--index", action="append", metavar="NAME",
+                        help="Exact index name instead of the pattern; repeat for several indices")
     p.add_argument("--time-field", default="@timestamp",
                    help="Default @timestamp (indexing time). Use 'start' for the report's own event time.")
     p.add_argument("--output", help="Zip path. Default: <domain>-before-<cutoff>.zip")
@@ -205,7 +212,12 @@ def main():
     os_ = OpenSearch(args.host, args.timeout, args.insecure)
     cutoff = parse_cutoff(args.before)
     cutoff_ms = int(cutoff.timestamp() * 1000)
-    pattern = args.index_pattern or f"{args.domain}-auditdata-*"
+    if args.index:
+        if any(c in name for name in args.index for c in "*,"):
+            p.error("--index takes exact index names (no wildcard or comma); use --index-pattern for patterns")
+        pattern = ",".join(args.index)
+    else:
+        pattern = args.index_pattern or f"{args.domain}-auditdata-*"
     query = build_query(args.domain, cutoff_ms, args.time_field)
 
     print(f"Host     : {args.host}")
